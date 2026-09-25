@@ -1,2 +1,5 @@
 numpy
 scipy
+mcp>=2,<3
+uvicorn
+httpx

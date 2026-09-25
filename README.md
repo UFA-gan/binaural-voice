@@ -12,7 +12,8 @@ TTS 生成的语音条都是单声道，戴耳机听，声音像在脑袋正中�
 ## 快速开始
 
 ```bash
-pip install numpy scipy
+pip install numpy scipy            # 只跑命令行渲染
+pip install -r requirements.txt    # 还要用 speak.py / MCP 服务
 ```
 
 **已经有一段单声道人声**（任何 TTS 或录音都行）：
@@ -86,6 +87,62 @@ function splitTags(text) {
 
 在 M3 Pro 的 Mac 上，16 秒的语音渲染大约 1 秒，适合语音条这种非实时的场景。实时通话就不建议加了。
 
+## 部署成 ChatGPT 的 remote MCP
+
+`mcp_server.py` 把整条流水线包成一个 MCP 工具：客户端调用 `speak`，服务端念稿、渲染、把 WAV 托管出去，工具返回一条链接。
+
+### 为什么返回链接而不是音频
+
+MCP 协议里有 base64 的 `AudioContent`，但 OpenAI 的 tool result 消息只接受 text part，音频会被静默丢掉。所以工具只能返回 URL。想在对话里内嵌播放器得走 ChatGPT Apps SDK 的 widget，那是另一回事。
+
+### 部署到 Zeabur
+
+1. 新建服务，连这个仓库。仓库里有 `Dockerfile`，会走 Docker 构建
+2. 设环境变量（完整列表见 `.env.example`）：
+   - `ELEVENLABS_API_KEY`、`ELEVENLABS_VOICE_ID`
+   - `MCP_SECRET` —— `python -c "import secrets;print(secrets.token_hex(16))"`
+3. 生成域名，健康检查路径填 `/healthz`
+4. 浏览器打开 `https://<域名>/`，应当看到 `{"service": "binaural-voice", ...}`
+
+不需要 ffmpeg：ElevenLabs 回来的是裸 PCM，直接由标准库 `wave` 写 WAV，没有解码环节。
+
+### 接到 ChatGPT
+
+Settings → Connectors → Advanced 打开 Developer mode，然后 Create：
+
+- URL：`https://<域名>/<MCP_SECRET>/mcp`
+- 鉴权：**No authentication**
+
+ChatGPT 的表单只有 OAuth 和 No authentication 两个选项，没地方填 bearer token（这点和 Claude 不一样）。所以门禁就是 URL 里的 `MCP_SECRET`，别泄露 —— 泄露了等于把 ElevenLabs 额度送人。`MAX_CHARS` 和 `RATE_LIMIT_PER_MIN` 才是真正的止损手段。
+
+建好之后不会自动生效：新开一个对话，点输入框的 `+` → More → Developer mode，启用这个 connector。每个新对话都要手动开一次。
+
+### 本地跑
+
+```bash
+pip install -r requirements.txt
+export ELEVENLABS_API_KEY=... ELEVENLABS_VOICE_ID=... MCP_SECRET=devsecret
+uvicorn mcp_server:app --host 0.0.0.0 --port 8080
+```
+
+验一下握手（不需要 ElevenLabs key）：
+
+```bash
+curl localhost:8080/healthz
+
+curl -X POST localhost:8080/devsecret/mcp \
+  -H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"c","version":"1"}}}'
+```
+
+### 两个部署时才会炸的坑
+
+**`streamable_http_app()` 的 `host` 不能用默认值。** 它默认是 `"127.0.0.1"`，而 MCP SDK 见到这个值会自动开启 DNS rebinding 保护、只放行 localhost 的 Host 头 —— 线上请求全部被拒，返回 421 `Invalid Host header`。本地怎么测都是好的，只有部署后才炸。`mcp_server.py` 里显式传了 `host="0.0.0.0"` 来关掉这个自动行为；想开着保护就设 `ALLOWED_HOSTS`。
+
+**渲染在事件循环里会卡住整个服务。** 1024 点帧逐帧卷积是 CPU 密集的，工具里用 `asyncio.to_thread` 把它踢到线程池，否则并发调用会互相阻塞。
+
+另外 `/tmp` 是临时的，容器重启后旧链接失效。生成后当场听没问题，要长期保留得挂持久卷。
+
 ## 为什么这么做：试听下来的结论
 
 - **近场实测数据明显更好。** 同一句耳语、同一条移动路线、同样的响度，打乱顺序盲听三种做法：Web Audio `PannerNode`（HRTF 模式）、Resonance Audio 网页版、KU100 近场数据离线渲染，近场那条胜出。前两种都没有近场效果：`PannerNode` 的距离只改音量、不改频谱；Resonance Audio 只有 C++ SDK 做了近场，网页版没有
@@ -97,7 +154,7 @@ function splitTags(text) {
 
 ## 调参
 
-参数都在 `binaural_voice.py` 顶部：
+参数都在 `binaural_render.py` 顶部：
 
 - `PLACES`：各位置的方向和默认距离
 - `HALF_TURN`：绕半圈用几秒
