@@ -59,7 +59,7 @@ python speak.py "[右耳][whispers] Don't move. [脑后] I'm right behind you. [
 
 ## 接进自己的应用
 
-1. **念之前把位置标签从稿子里拿掉**。eleven_v3 会把不认识的方括号当成演出指令去演。同时记下每个标签落在拿掉之后的第几个字
+1. **念之前把位置标签从稿子里拿掉**。eleven_v4 会把不认识的方括号当成演出指令去演。同时记下每个标签落在拿掉之后的第几个字
 2. 用 **`/v1/text-to-speech/{voice_id}/with-timestamps`** 合成。价格跟普通接口一样，一次请求同时返回音频和逐字的起止时间
 3. 取标签后面那个字的开始时间，换算成秒
 4. 调用 `binaural_voice.py in.wav out.wav '<cues JSON>'`

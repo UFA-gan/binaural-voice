@@ -3,7 +3,7 @@
 
 给 speak.py（命令行）和 mcp_server.py（MCP 工具）共用，只此一处调 API。
 
-位置标签必须在发请求前拿掉：eleven_v3 会把不认识的方括号当演出指令去演。
+位置标签必须在发请求前拿掉：eleven_v4 会把不认识的方括号当演出指令去演。
 `[whispers]` 这类演出标签不匹配 TAG，原样透传，是故意保留的。
 """
 import base64
@@ -17,7 +17,7 @@ API_BASE = "https://api.elevenlabs.io/v1"
 TAG = re.compile(r"\[(左耳|右耳|脑后|面前|贴近|退开)\]")
 VOICE_ID_RE = re.compile(r"\A[A-Za-z0-9_-]{1,64}\Z")
 
-DEFAULT_MODEL = "eleven_v3"
+DEFAULT_MODEL = "eleven_v4"
 DEFAULT_FORMAT = "pcm_24000"   # pcm_44100 只有 Pro 及以上套餐能用
 DEFAULT_TIMEOUT = 120.0
 
