@@ -34,6 +34,8 @@ from binaural_render import render_pcm
 from eleven import ElevenLabsError, synthesize
 
 log = logging.getLogger("binaural-voice")
+log.setLevel(logging.INFO)
+POD_NAME = os.environ.get("HOSTNAME", "unknown")
 
 MCP_SECRET = os.environ.get("MCP_SECRET", "").strip()
 if not MCP_SECRET:
@@ -50,6 +52,27 @@ PUBLIC_BASE_URL = os.environ.get("PUBLIC_BASE_URL", "").rstrip("/")
 ALLOWED_HOSTS = [h.strip() for h in os.environ.get("ALLOWED_HOSTS", "").split(",") if h.strip()]
 AUDIO_DIR = Path(os.environ.get("AUDIO_DIR") or Path(tempfile.gettempdir()) / "binaural-audio")
 AUDIO_DIR.mkdir(parents=True, exist_ok=True)
+
+def _audio_inventory(limit: int = 20) -> list[str]:
+    """用于排障的精简目录快照；只写进服务日志，不返回给外部请求。"""
+    try:
+        files = sorted(
+            (p for p in AUDIO_DIR.iterdir() if p.is_file()),
+            key=lambda p: p.stat().st_mtime,
+            reverse=True,
+        )
+        return [f"{p.name}:{p.stat().st_size}B" for p in files[:limit]]
+    except OSError as e:
+        return [f"<读取失败: {type(e).__name__}: {e}>"]
+
+
+log.info(
+    "音频目录就绪 pod=%s dir=%s ttl=%ss files=%s",
+    POD_NAME,
+    AUDIO_DIR,
+    AUDIO_TTL_SECONDS,
+    _audio_inventory(),
+)
 
 # 工具签名里拿不到 Request（MCP 的 custom_route 拿得到，tool 不行），所以用中间件把
 # Host 和客户端 IP 塞进 ContextVar。ContextVar 会随 asyncio 任务树向下复制，工具能读到。
@@ -184,18 +207,41 @@ async def speak(text: str, voice_id: str | None = None) -> str:
     if not speech.aligned:
         log.warning("对齐表字数对不上，这次退化成随机走位")
 
+    # 先清理旧文件，再创建本次文件，避免极端 TTL 配置把刚生成的结果顺手删掉。
+    _sweep()
     name = f"{uuid.uuid4().hex}.wav"
+    path = AUDIO_DIR / name
     try:
         dur, cues = await asyncio.to_thread(
-            render_pcm, speech.pcm, speech.sample_rate, str(AUDIO_DIR / name), speech.cues
+            render_pcm, speech.pcm, speech.sample_rate, str(path), speech.cues
         )
     except Exception as e:                      # 渲染失败不该把 MCP 连接搞崩
-        log.exception("渲染失败")
+        log.exception("渲染失败 pod=%s path=%s", POD_NAME, path)
         return f"渲染失败：{type(e).__name__}: {e}"
 
-    _sweep()
+    exists = path.is_file()
+    size = path.stat().st_size if exists else None
+    log.info(
+        "渲染完成 pod=%s duration=%.1fs path=%s exists=%s size=%s files=%s",
+        POD_NAME,
+        dur,
+        path,
+        exists,
+        size,
+        _audio_inventory(),
+    )
+    if not exists or not size:
+        log.error(
+            "渲染结果未落盘 pod=%s path=%s exists=%s size=%s files=%s",
+            POD_NAME,
+            path,
+            exists,
+            size,
+            _audio_inventory(),
+        )
+        return "渲染流程已结束，但音频文件没有成功落盘。请查看服务运行日志。"
+
     url = f"{base}/{MCP_SECRET}/audio/{name}"
-    log.info("渲染完成 %.1fs -> %s", dur, name)
 
     walk = "（稿子里没有位置标签，这次是随机走位）" if not speech.cues else json.dumps(cues, ensure_ascii=False)
     return (
@@ -231,11 +277,24 @@ async def audio(request: Request) -> Response:
     """托管渲染结果。文件名是 uuid4（122 bit 熵）已经是能力式 URL，secret 前缀算纵深防御。"""
     name = request.path_params["name"]
     if not _AUDIO_NAME.match(name):             # 正则只放行 32 位 hex，顺带挡掉路径穿越
+        log.warning("拒绝非法音频文件名 pod=%s name=%r", POD_NAME, name)
         return Response("not found", status_code=404)
+
+    # 先清理再检查；原来的顺序可能先确认文件存在、随后把过期文件删掉，再交给 FileResponse。
+    _sweep()
     path = AUDIO_DIR / name
     if not path.is_file():
+        log.warning(
+            "音频文件不存在 pod=%s path=%s ttl=%ss files=%s",
+            POD_NAME,
+            path,
+            AUDIO_TTL_SECONDS,
+            _audio_inventory(),
+        )
         return Response("not found", status_code=404)
-    _sweep()
+
+    size = path.stat().st_size
+    log.info("发送音频 pod=%s path=%s size=%s", POD_NAME, path, size)
     return FileResponse(path, media_type="audio/wav")
 
 
